@@ -1,0 +1,19 @@
+product_id,product_name,category,unit_price,cost_price,reorder_point,reorder_quantity,supplier_id
+P001,BBQ Pork Bun,bun,2.5,1.0,50,200,SUP002
+P002,Red Bean Bun,bun,2.0,0.8,40,150,SUP002
+P003,Custard Bun,bun,2.5,0.9,50,200,SUP002
+P004,Lotus Paste Bun,bun,2.5,1.1,30,120,SUP002
+P005,Kaya Bun,bun,2.0,0.8,40,150,SUP002
+P006,Chicken Bun,bun,2.8,1.2,30,120,SUP002
+P007,Vegetable Bun,bun,2.0,0.7,20,80,SUP002
+P008,Salted Egg Bun,bun,3.0,1.3,30,100,SUP002
+P009,Pandan Bun,bun,2.0,0.8,20,80,SUP002
+P010,Coffee Bun,bun,2.0,0.8,20,80,SUP002
+P011,Plain Mantou,bun,1.5,0.5,40,150,SUP001
+P012,Fried Mantou,bun,2.0,0.7,30,100,SUP001
+P013,Siew Mai,dimsum,1.8,0.7,50,200,SUP004
+P014,Har Gow,dimsum,2.0,0.9,40,150,SUP004
+P015,Lo Mai Gai,dimsum,3.5,1.5,20,80,SUP004
+P016,Spring Roll,dimsum,1.5,0.5,40,150,SUP004
+P017,Egg Tart,pastry,2.5,1.0,30,120,SUP001
+P018,Tau Sa Piah,pastry,1.8,0.6,20,80,SUP001

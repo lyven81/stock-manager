@@ -1,0 +1,5 @@
+supplier_id,supplier_name,contact_phone,email,lead_time_days
+SUP001,Fresh Flour Trading,+60123456789,orders@freshflour.my,2
+SUP002,Ah Kow Filling Supply,+60129876543,ahkow@fillingsupply.my,1
+SUP003,Golden Wrap Packaging,+60111234567,sales@goldenwrap.my,3
+SUP004,Heng Huat Frozen Supply,+60145678901,order@henghuat.my,2
