@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Manager</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f0f2f5;
+            height: 100vh;
+            display: flex;
+        }
+
+        /* Left panel: Inventory */
+        .inventory-panel {
+            width: 300px;
+            background: white;
+            border-right: 1px solid #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+        .inventory-header {
+            background: #f8f9fa;
+            padding: 16px;
+            border-bottom: 1px solid #e0e0e0;
+            font-weight: 600;
+            font-size: 14px;
+            color: #333;
+        }
+        .inventory-header span {
+            font-weight: 400;
+            font-size: 12px;
+            color: #888;
+            display: block;
+            margin-top: 4px;
+        }
+        .inventory-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+        .inv-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-bottom: 2px;
+        }
+        .inv-item:hover { background: #f8f9fa; }
+        .inv-item .name { flex: 1; color: #333; }
+        .inv-item .stock {
+            font-weight: 600;
+            font-size: 12px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-left: 8px;
+            white-space: nowrap;
+        }
+        .inv-item .stock.critical { background: #fce4e4; color: #d32f2f; }
+        .inv-item .stock.low { background: #fff3e0; color: #e65100; }
+        .inv-item .stock.healthy { background: #e8f5e9; color: #2e7d32; }
+        .inv-legend {
+            padding: 10px 16px;
+            border-top: 1px solid #e0e0e0;
+            font-size: 11px;
+            color: #888;
+            display: flex;
+            gap: 12px;
+        }
+        .inv-legend .dot {
+            width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px;
+        }
+        .dot.critical { background: #d32f2f; }
+        .dot.low { background: #e65100; }
+        .dot.healthy { background: #2e7d32; }
+
+        /* Right panel: Chat */
+        .chat-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background: #1a73e8;
+            color: white;
+            padding: 16px 24px;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        .header span {
+            font-size: 13px;
+            font-weight: 400;
+            opacity: 0.85;
+            margin-left: 12px;
+        }
+        .chat-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        /* Welcome section */
+        .welcome-section {
+            align-self: center;
+            text-align: center;
+            max-width: 500px;
+            margin-top: 20px;
+        }
+        .welcome-section h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 8px;
+        }
+        .welcome-section p {
+            font-size: 14px;
+            color: #666;
+            line-height: 1.5;
+            margin-bottom: 20px;
+        }
+        .quick-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .quick-btn {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 12px 16px;
+            font-size: 14px;
+            color: #1a73e8;
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.15s;
+        }
+        .quick-btn:hover {
+            background: #e8f0fe;
+            border-color: #1a73e8;
+        }
+
+        /* Messages */
+        .message {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 14px;
+            white-space: pre-wrap;
+        }
+        .message.user {
+            align-self: flex-end;
+            background: #1a73e8;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+        .message.agent {
+            align-self: flex-start;
+            background: white;
+            color: #1f1f1f;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .message.agent table {
+            border-collapse: collapse;
+            margin: 8px 0;
+            font-size: 13px;
+            width: 100%;
+        }
+        .message.agent th, .message.agent td {
+            border: 1px solid #e0e0e0;
+            padding: 6px 10px;
+            text-align: left;
+        }
+        .message.agent th {
+            background: #f5f5f5;
+            font-weight: 600;
+        }
+        .message.agent a {
+            color: #1a73e8;
+            text-decoration: underline;
+        }
+
+        /* Input */
+        .input-area {
+            background: white;
+            padding: 16px 24px;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 12px;
+        }
+        .input-area input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #ddd;
+            border-radius: 24px;
+            font-size: 14px;
+            outline: none;
+        }
+        .input-area input:focus { border-color: #1a73e8; }
+        .input-area button {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 44px;
+            height: 44px;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .input-area button:disabled { background: #ccc; cursor: not-allowed; }
+
+        .typing {
+            align-self: flex-start;
+            color: #888;
+            font-size: 13px;
+            padding: 8px 16px;
+        }
+        .typing::after {
+            content: '...';
+            animation: dots 1.5s infinite;
+        }
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            body { flex-direction: column; }
+            .inventory-panel {
+                width: 100%;
+                max-height: 200px;
+                border-right: none;
+                border-bottom: 1px solid #e0e0e0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Left: Inventory Panel -->
+    <div class="inventory-panel">
+        <div class="inventory-header">
+            Current Inventory
+            <span>Live stock levels for 18 products</span>
+        </div>
+        <div class="inventory-list" id="inventoryList">
+            <div style="padding: 16px; color: #888; font-size: 13px;">Loading...</div>
+        </div>
+        <div class="inv-legend">
+            <span><span class="dot critical"></span>Critical</span>
+            <span><span class="dot low"></span>Low</span>
+            <span><span class="dot healthy"></span>Healthy</span>
+        </div>
+    </div>
+
+    <!-- Right: Chat Panel -->
+    <div class="chat-panel">
+        <div class="header">
+            Stock Manager
+            <span>Smart Restocking for Your Steam Bun Shop</span>
+        </div>
+        <div class="chat-area" id="chatArea">
+            <div class="welcome-section" id="welcomeSection">
+                <h2>What should you restock this week?</h2>
+                <p>Stock Manager analyzes your sales trends, checks inventory levels, and creates a purchase order in Google Sheets — all in one step.</p>
+                <div class="quick-actions">
+                    <button class="quick-btn" onclick="askQuestion('What should I restock this week?')">What should I restock this week?</button>
+                    <button class="quick-btn" onclick="askQuestion('Which products are selling the fastest?')">Which products are selling the fastest?</button>
+                    <button class="quick-btn" onclick="askQuestion('Show me items with low stock')">Show me items with low stock</button>
+                    <button class="quick-btn" onclick="askQuestion('Are there any products with rising demand?')">Are there any products with rising demand?</button>
+                </div>
+            </div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="msgInput" placeholder="Ask about restocking, sales trends, or inventory..."
+                   onkeydown="if(event.key==='Enter')sendMessage()">
+            <button id="sendBtn" onclick="sendMessage()">&#9654;</button>
+        </div>
+    </div>
+
+    <script>
+        let sessionId = null;
+
+        // Load inventory on page load
+        async function loadInventory() {
+            try {
+                const res = await fetch('/api/inventory');
+                const data = await res.json();
+                const list = document.getElementById('inventoryList');
+                list.innerHTML = '';
+                data.products.forEach(p => {
+                    const div = document.createElement('div');
+                    div.className = 'inv-item';
+                    div.innerHTML = `
+                        <span class="name">${p.product_name}</span>
+                        <span class="stock ${p.status}">${p.current_stock} / ${p.reorder_point}</span>
+                    `;
+                    list.appendChild(div);
+                });
+            } catch (e) {
+                document.getElementById('inventoryList').innerHTML =
+                    '<div style="padding: 16px; color: #d32f2f; font-size: 13px;">Failed to load inventory</div>';
+            }
+        }
+
+        function askQuestion(question) {
+            document.getElementById('msgInput').value = question;
+            sendMessage();
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('msgInput');
+            const msg = input.value.trim();
+            if (!msg) return;
+
+            input.value = '';
+            document.getElementById('sendBtn').disabled = true;
+
+            // Remove welcome section
+            const welcome = document.getElementById('welcomeSection');
+            if (welcome) welcome.remove();
+
+            addMessage(msg, 'user');
+
+            const typing = document.createElement('div');
+            typing.className = 'typing';
+            typing.textContent = 'Analyzing';
+            document.getElementById('chatArea').appendChild(typing);
+            scrollToBottom();
+
+            try {
+                const body = { message: msg };
+                if (sessionId) body.session_id = sessionId;
+
+                const res = await fetch('/api/restock', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await res.json();
+                sessionId = data.session_id;
+                typing.remove();
+                addMessage(data.response, 'agent');
+            } catch (err) {
+                typing.remove();
+                addMessage('Error: Could not reach the server.', 'agent');
+            }
+
+            document.getElementById('sendBtn').disabled = false;
+        }
+
+        function addMessage(text, role) {
+            const chatArea = document.getElementById('chatArea');
+            const div = document.createElement('div');
+            div.className = `message ${role}`;
+
+            if (role === 'agent') {
+                let html = text;
+                // Convert markdown tables to HTML
+                html = html.replace(/\|(.+)\|\n\|[-:| ]+\|\n((?:\|.+\|\n?)*)/g, (match, header, body) => {
+                    const headers = header.split('|').map(h => h.trim()).filter(Boolean);
+                    const rows = body.trim().split('\n').map(row =>
+                        row.split('|').map(c => c.trim()).filter(Boolean)
+                    );
+                    let table = '<table><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+                    rows.forEach(row => {
+                        table += '<tr>' + row.map(c => `<td>${c}</td>`).join('') + '</tr>';
+                    });
+                    table += '</tbody></table>';
+                    return table;
+                });
+                // Convert markdown links
+                html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+                // Convert bold
+                html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+                // Convert bullet points
+                html = html.replace(/^\*\s+/gm, '&bull; ');
+                // Line breaks
+                html = html.replace(/\n/g, '<br>');
+                div.innerHTML = html;
+            } else {
+                div.textContent = text;
+            }
+
+            chatArea.appendChild(div);
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            const chatArea = document.getElementById('chatArea');
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        // Load inventory on page load
+        loadInventory();
+    </script>
+</body>
+</html>
