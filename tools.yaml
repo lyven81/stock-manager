@@ -1,0 +1,160 @@
+# MCP Toolbox for Databases configuration
+# Defines AlloyDB connection + 5 tools that agents call via HTTP/MCP
+# Tools are invoked at: http://localhost:5000/api/tool/{tool-name}/invoke
+
+sources:
+  alloydb-stockmanager:
+    kind: postgres
+    host: ${DB_HOST}
+    port: 5432
+    database: ${DB_NAME}
+    user: ${DB_USER}
+    password: ${DB_PASS}
+
+tools:
+  get-sales-summary:
+    kind: postgres-sql
+    source: alloydb-stockmanager
+    description: |
+      Get average daily sales per product for the recent N days.
+      Returns each product's product_id, product_name, category, total_sold, avg_daily.
+      Sorted by total_sold descending.
+    parameters:
+      - name: period_days
+        type: integer
+        description: Number of recent days to analyze (default 7)
+    statement: |
+      SELECT p.product_id, p.product_name, p.category,
+             COALESCE(SUM(s.quantity_sold), 0) AS total_sold,
+             ROUND(COALESCE(SUM(s.quantity_sold), 0)::numeric / $1, 1) AS avg_daily
+      FROM products p
+      LEFT JOIN sales s ON p.product_id = s.product_id
+        AND s.sale_date > (SELECT MAX(sale_date) FROM sales) - MAKE_INTERVAL(days => $1)
+      GROUP BY p.product_id, p.product_name, p.category
+      ORDER BY total_sold DESC
+
+  get-sales-trends:
+    kind: postgres-sql
+    source: alloydb-stockmanager
+    description: |
+      Compare last 7 days vs prior 7 days to detect rising/falling demand per product.
+      Returns product_id, product_name, recent_sold, prev_sold, pct_change, trend.
+      Trend is rising (>=10%), falling (<=-10%), or stable.
+    parameters: []
+    statement: |
+      WITH latest AS (SELECT MAX(sale_date) AS d FROM sales),
+      recent AS (
+          SELECT product_id, SUM(quantity_sold) AS recent_sold
+          FROM sales, latest
+          WHERE sale_date > latest.d - INTERVAL '7 days'
+          GROUP BY product_id
+      ),
+      prev AS (
+          SELECT product_id, SUM(quantity_sold) AS prev_sold
+          FROM sales, latest
+          WHERE sale_date > latest.d - INTERVAL '14 days'
+            AND sale_date <= latest.d - INTERVAL '7 days'
+          GROUP BY product_id
+      )
+      SELECT p.product_id, p.product_name,
+             COALESCE(r.recent_sold, 0) AS recent_sold,
+             COALESCE(pr.prev_sold, 0) AS prev_sold,
+             CASE WHEN COALESCE(pr.prev_sold, 0) = 0 THEN 0
+                  ELSE ROUND(((COALESCE(r.recent_sold, 0) - COALESCE(pr.prev_sold, 0))::numeric
+                       / pr.prev_sold) * 100, 1)
+             END AS pct_change,
+             CASE
+               WHEN COALESCE(pr.prev_sold, 0) = 0 THEN 'stable'
+               WHEN ((COALESCE(r.recent_sold, 0) - COALESCE(pr.prev_sold, 0))::numeric
+                    / pr.prev_sold) * 100 >= 10 THEN 'rising'
+               WHEN ((COALESCE(r.recent_sold, 0) - COALESCE(pr.prev_sold, 0))::numeric
+                    / pr.prev_sold) * 100 <= -10 THEN 'falling'
+               ELSE 'stable'
+             END AS trend
+      FROM products p
+      LEFT JOIN recent r ON p.product_id = r.product_id
+      LEFT JOIN prev pr ON p.product_id = pr.product_id
+      ORDER BY pct_change DESC
+
+  get-inventory-status:
+    kind: postgres-sql
+    source: alloydb-stockmanager
+    description: |
+      Get current stock levels for all products with their reorder points and supplier info.
+      Returns product_id, product_name, category, current_stock, reorder_point,
+      reorder_quantity, supplier_name, supplier_id, status (critical/low/healthy).
+    parameters: []
+    statement: |
+      SELECT p.product_id, p.product_name, p.category,
+             i.current_stock, p.reorder_point, p.reorder_quantity,
+             s.supplier_name, s.supplier_id,
+             CASE
+               WHEN i.current_stock < p.reorder_point * 0.5 THEN 'critical'
+               WHEN i.current_stock < p.reorder_point THEN 'low'
+               ELSE 'healthy'
+             END AS status
+      FROM products p
+      JOIN inventory i ON p.product_id = i.product_id
+      JOIN suppliers s ON p.supplier_id = s.supplier_id
+      ORDER BY (i.current_stock::float / NULLIF(p.reorder_point, 0)) ASC
+
+  get-low-stock-items:
+    kind: postgres-sql
+    source: alloydb-stockmanager
+    description: |
+      Get only products that are below their reorder point (need restocking).
+      Returns full supplier contact info for purchase orders.
+    parameters: []
+    statement: |
+      SELECT p.product_id, p.product_name, p.category,
+             i.current_stock, p.reorder_point, p.reorder_quantity,
+             s.supplier_name, s.contact_phone, s.email, s.lead_time_days
+      FROM products p
+      JOIN inventory i ON p.product_id = i.product_id
+      JOIN suppliers s ON p.supplier_id = s.supplier_id
+      WHERE i.current_stock < p.reorder_point
+      ORDER BY (i.current_stock::float / NULLIF(p.reorder_point, 0)) ASC
+
+  find-similar-pattern-items:
+    kind: postgres-sql
+    source: alloydb-stockmanager
+    description: |
+      Vector similarity search: given a fast-mover product_id, find the top N products
+      with the most similar 6-week sales velocity pattern (excluding the input product
+      and products already low on stock). Used for predictive restocking — these are
+      items behaving like fast sellers, candidates for early restock.
+      Returns product_id, product_name, similarity_score (1.0 = identical pattern),
+      current_stock, reorder_point, supplier_name, contact_phone.
+    parameters:
+      - name: reference_product_id
+        type: string
+        description: product_id of the fast-mover whose pattern to match
+      - name: top_n
+        type: integer
+        description: how many similar products to return (default 5)
+    statement: |
+      WITH ref AS (
+        SELECT sales_pattern_embedding AS vec
+        FROM products
+        WHERE product_id = $1
+      )
+      SELECT p.product_id, p.product_name,
+             ROUND((1 - (p.sales_pattern_embedding <=> ref.vec))::numeric, 3) AS similarity_score,
+             i.current_stock, p.reorder_point, p.reorder_quantity,
+             s.supplier_name, s.contact_phone
+      FROM products p
+      CROSS JOIN ref
+      JOIN inventory i ON p.product_id = i.product_id
+      JOIN suppliers s ON p.supplier_id = s.supplier_id
+      WHERE p.product_id != $1
+        AND p.sales_pattern_embedding IS NOT NULL
+      ORDER BY p.sales_pattern_embedding <=> ref.vec ASC
+      LIMIT $2
+
+toolsets:
+  stock-manager-tools:
+    - get-sales-summary
+    - get-sales-trends
+    - get-inventory-status
+    - get-low-stock-items
+    - find-similar-pattern-items

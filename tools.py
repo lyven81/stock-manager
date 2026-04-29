@@ -1,4 +1,15 @@
-"""Tool functions for Stock Manager agents."""
+"""Tool functions for Stock Manager agents.
+
+Refined architecture: Database-backed tools now call MCP Toolbox via HTTP
+(localhost:5000) instead of executing SQL directly. The Order Generator's
+Google Sheets push remains a direct integration since it's an external system,
+not a database query.
+
+This refactor:
+  - Standardizes data access through MCP Toolbox (Cohort 1 lab pattern)
+  - Adds find_similar_pattern_items for vector-based predictive restocking
+  - Keeps direct SQLAlchemy access only for /api/inventory and the migration
+"""
 
 import os
 import json
@@ -6,13 +17,48 @@ from decimal import Decimal
 from dotenv import load_dotenv
 import sqlalchemy
 from sqlalchemy import text
+import httpx
 import gspread
 import google.auth
 
 load_dotenv()
 
-# --- Database connection ---
-# Uses direct PostgreSQL connection via VPC connector in Cloud Run
+MCP_TOOLBOX_URL = os.environ.get("MCP_TOOLBOX_URL", "http://localhost:5000")
+
+# --- MCP Toolbox HTTP client ---
+
+
+def _invoke_toolbox(tool_name: str, params: dict | None = None) -> dict:
+    """Invoke an MCP Toolbox tool via HTTP and return the result.
+
+    Handles response variations across toolbox versions:
+      - {"result": [...rows...]}      → return list wrapped in {"data": [...]}
+      - {"result": "json_string"}     → parse string and wrap
+      - direct list/dict response     → return wrapped or as-is
+    """
+    url = f"{MCP_TOOLBOX_URL}/api/tool/{tool_name}/invoke"
+    try:
+        response = httpx.post(url, json=params or {}, timeout=30.0)
+        response.raise_for_status()
+        data = response.json()
+        result = data.get("result", data)
+        # Toolbox may return result as a JSON-encoded string
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except json.JSONDecodeError:
+                pass
+        # Wrap list results in a dict so ADK/Gemini can interpret them as a tool output
+        if isinstance(result, list):
+            return {"rows": result, "count": len(result)}
+        if isinstance(result, dict):
+            return result
+        return {"result": result}
+    except httpx.HTTPError as e:
+        return {"error": f"MCP Toolbox call failed for {tool_name}: {e}"}
+
+
+# --- Direct DB engine (for non-agent endpoints + migration) ---
 
 _engine = None
 
@@ -37,6 +83,7 @@ def _convert(val):
 
 
 def _query(sql, params=None):
+    """Direct SQL query — used by /api/inventory and migration only."""
     engine = _get_engine()
     with engine.connect() as conn:
         result = conn.execute(text(sql), params or {})
@@ -45,140 +92,106 @@ def _query(sql, params=None):
     return rows
 
 
-# --- Sales Analyst Tools ---
+# --- Sales Analyst Tools (via MCP Toolbox) ---
 
 
 def get_sales_summary(period_days: int = 7) -> dict:
     """Get average daily sales per product for the specified recent period.
 
+    Calls MCP Toolbox tool: get-sales-summary
+
     Args:
         period_days: Number of recent days to analyze. Default is 7.
 
     Returns:
-        A dict with a list of products and their average daily sales, sorted by volume descending.
+        Dict with products list — each has product_id, product_name, category,
+        total_sold, avg_daily.
     """
-    rows = _query("""
-        SELECT p.product_id, p.product_name, p.category,
-               COALESCE(SUM(s.quantity_sold), 0) AS total_sold,
-               ROUND(COALESCE(SUM(s.quantity_sold), 0)::numeric / :days, 1) AS avg_daily
-        FROM products p
-        LEFT JOIN sales s ON p.product_id = s.product_id
-            AND s.sale_date > (SELECT MAX(sale_date) FROM sales) - INTERVAL ':days days'
-        GROUP BY p.product_id, p.product_name, p.category
-        ORDER BY total_sold DESC
-    """.replace(":days", str(int(period_days))))
-    return {"period_days": period_days, "products": rows}
+    return _invoke_toolbox("get-sales-summary", {"period_days": period_days})
 
 
 def get_sales_trends() -> dict:
-    """Compare sales from the most recent 7 days vs the prior 7 days to detect rising or falling demand.
+    """Compare last 7 days vs prior 7 days to detect rising or falling demand per product.
+
+    Calls MCP Toolbox tool: get-sales-trends
 
     Returns:
-        A dict with each product's recent sales, previous sales, percentage change, and trend direction (rising, falling, or stable).
+        Dict with products list — each has product_id, product_name, recent_sold,
+        prev_sold, pct_change, trend (rising/falling/stable).
     """
-    rows = _query("""
-        WITH date_range AS (
-            SELECT MAX(sale_date) AS max_date FROM sales
-        ),
-        recent AS (
-            SELECT product_id, SUM(quantity_sold) AS recent_sold
-            FROM sales, date_range
-            WHERE sale_date > max_date - INTERVAL '7 days'
-            GROUP BY product_id
-        ),
-        previous AS (
-            SELECT product_id, SUM(quantity_sold) AS prev_sold
-            FROM sales, date_range
-            WHERE sale_date > max_date - INTERVAL '14 days'
-              AND sale_date <= max_date - INTERVAL '7 days'
-            GROUP BY product_id
-        )
-        SELECT p.product_id, p.product_name,
-               COALESCE(r.recent_sold, 0) AS recent_sold,
-               COALESCE(pr.prev_sold, 0) AS prev_sold,
-               CASE
-                   WHEN COALESCE(pr.prev_sold, 0) = 0 THEN 0
-                   ELSE ROUND(((COALESCE(r.recent_sold, 0) - COALESCE(pr.prev_sold, 0))::numeric
-                        / pr.prev_sold) * 100, 1)
-               END AS pct_change
-        FROM products p
-        LEFT JOIN recent r ON p.product_id = r.product_id
-        LEFT JOIN previous pr ON p.product_id = pr.product_id
-        ORDER BY pct_change DESC
-    """)
-    for row in rows:
-        pct = float(row["pct_change"])
-        if pct >= 10:
-            row["trend"] = "rising"
-        elif pct <= -10:
-            row["trend"] = "falling"
-        else:
-            row["trend"] = "stable"
-    return {"comparison": "last 7 days vs prior 7 days", "products": rows}
+    return _invoke_toolbox("get-sales-trends")
 
 
-# --- Inventory Checker Tools ---
+def find_similar_pattern_items(reference_product_id: str, top_n: int = 5) -> dict:
+    """Vector similarity search: find products behaving like a given fast-mover.
+
+    Uses AlloyDB AI vector embeddings on 6-week sales velocity patterns.
+    Returns the top N products whose sales pattern is closest to the reference
+    product's pattern, EXCLUDING the reference itself. These are candidates for
+    PREDICTIVE restocking — items likely to become fast sellers.
+
+    Calls MCP Toolbox tool: find-similar-pattern-items
+
+    Args:
+        reference_product_id: product_id of a known fast-mover
+        top_n: how many similar items to return (default 5)
+
+    Returns:
+        Dict with products list — each has product_id, product_name,
+        similarity_score (0-1, higher = more similar pattern), current_stock,
+        reorder_point, reorder_quantity, supplier_name, contact_phone.
+    """
+    return _invoke_toolbox("find-similar-pattern-items", {
+        "reference_product_id": reference_product_id,
+        "top_n": top_n,
+    })
+
+
+# --- Inventory Checker Tools (via MCP Toolbox) ---
 
 
 def get_inventory_status() -> dict:
-    """Get current stock levels for all products with their reorder points.
+    """Get current stock levels for all products with reorder points and supplier info.
+
+    Calls MCP Toolbox tool: get-inventory-status
 
     Returns:
-        A dict with each product's current stock, reorder point, and status (critical, low, or healthy).
+        Dict with products list — each has product_id, product_name, category,
+        current_stock, reorder_point, reorder_quantity, supplier_name,
+        supplier_id, status (critical/low/healthy).
     """
-    rows = _query("""
-        SELECT p.product_id, p.product_name, p.category,
-               i.current_stock, p.reorder_point, p.reorder_quantity,
-               s.supplier_name, s.supplier_id
-        FROM products p
-        JOIN inventory i ON p.product_id = i.product_id
-        JOIN suppliers s ON p.supplier_id = s.supplier_id
-        ORDER BY (i.current_stock::float / NULLIF(p.reorder_point, 0)) ASC
-    """)
-    for row in rows:
-        stock = int(row["current_stock"])
-        reorder = int(row["reorder_point"])
-        if stock < reorder * 0.5:
-            row["status"] = "critical"
-        elif stock < reorder:
-            row["status"] = "low"
-        else:
-            row["status"] = "healthy"
-    return {"products": rows}
+    return _invoke_toolbox("get-inventory-status")
 
 
 def get_low_stock_items() -> dict:
-    """Get only items that are below their reorder point.
+    """Get only products below their reorder point (need restocking).
+
+    Calls MCP Toolbox tool: get-low-stock-items
 
     Returns:
-        A dict with products that need restocking, including current stock, reorder point, and supplier info.
+        Dict with items list — each has product_id, product_name, category,
+        current_stock, reorder_point, reorder_quantity, supplier_name,
+        contact_phone, email, lead_time_days.
     """
-    rows = _query("""
-        SELECT p.product_id, p.product_name, p.category,
-               i.current_stock, p.reorder_point, p.reorder_quantity,
-               s.supplier_name, s.contact_phone, s.email, s.lead_time_days
-        FROM products p
-        JOIN inventory i ON p.product_id = i.product_id
-        JOIN suppliers s ON p.supplier_id = s.supplier_id
-        WHERE i.current_stock < p.reorder_point
-        ORDER BY (i.current_stock::float / NULLIF(p.reorder_point, 0)) ASC
-    """)
-    return {"low_stock_count": len(rows), "items": rows}
+    return _invoke_toolbox("get-low-stock-items")
 
 
-# --- Order Generator Tools ---
+# --- Order Generator Tool (direct integration with Google Sheets) ---
 
 
 def create_purchase_order(order_items_json: str) -> dict:
-    """Create a purchase order and push it to Google Sheets.
+    """Create a purchase order and push it to Google Sheets via MCP.
 
     Args:
-        order_items_json: A JSON string containing a list of items to order.
-            Each item should have: product_name, quantity, supplier_name, contact_phone.
-            Example: [{"product_name": "BBQ Pork Bun", "quantity": 200, "supplier_name": "Ah Kow", "contact_phone": "+60129876543"}]
+        order_items_json: JSON string with list of items. Each item must have:
+            product_name, quantity, supplier_name, contact_phone, reason.
+            'reason' is one of: "Low Stock", "Trending Up", "Similar Pattern".
+            Example: [{"product_name": "BBQ Pork Bun", "quantity": 200,
+                      "supplier_name": "Ah Kow", "contact_phone": "+60129876543",
+                      "reason": "Low Stock"}]
 
     Returns:
-        A dict confirming the purchase order was created with a link to the Google Sheet.
+        Dict confirming creation with sheet_url and sheet_title.
     """
     items = json.loads(order_items_json)
     if not items:
@@ -203,7 +216,7 @@ def create_purchase_order(order_items_json: str) -> dict:
     except gspread.exceptions.WorksheetNotFound:
         worksheet = sh.add_worksheet(title=sheet_title, rows=100, cols=10)
 
-    header = ["Product", "Quantity", "Supplier", "Contact Phone"]
+    header = ["Product", "Quantity", "Supplier", "Contact Phone", "Reason"]
     rows = [header]
 
     current_supplier = None
@@ -211,14 +224,15 @@ def create_purchase_order(order_items_json: str) -> dict:
         supplier = item.get("supplier_name", "Unknown")
         if supplier != current_supplier:
             if current_supplier is not None:
-                rows.append(["", "", "", ""])
-            rows.append([f"--- {supplier} ---", "", "", ""])
+                rows.append(["", "", "", "", ""])
+            rows.append([f"--- {supplier} ---", "", "", "", ""])
             current_supplier = supplier
         rows.append([
             item.get("product_name", ""),
             str(item.get("quantity", 0)),
             supplier,
             item.get("contact_phone", ""),
+            item.get("reason", ""),
         ])
 
     worksheet.update(range_name="A1", values=rows)

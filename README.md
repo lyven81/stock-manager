@@ -1,112 +1,85 @@
-# Stock Manager
+# Stock Manager — Top 100 Refinement Build
 
-Smart restocking system for a steam bun shop, built with Google ADK multi-agent architecture.
+Smart restocking system for a steam bun shop. Built with Google ADK multi-agent architecture, refined with MCP Toolbox for Databases and AlloyDB AI vector embeddings.
 
 **Live Demo:** [https://stock-manager-522143897885.asia-southeast1.run.app](https://stock-manager-522143897885.asia-southeast1.run.app)
 
 ## Problem
 
-A steam bun shop restocks by over-ordering slow-moving items and running out of fast sellers. Without data-driven insights, they waste money on excess stock and lose sales from stockouts.
+A steam bun shop stocks the wrong buns; agents analyze data to match supply with demand. Existing inventory tools only flag what is already low — by then, you have already lost sales. Stock Manager goes further by detecting which products are *behaving* like fast sellers, so they get restocked before they stock out.
 
-## Solution
+## Refinement (vs. original submission)
 
-Stock Manager uses multiple AI agents to automate restocking. It analyzes sales trends, monitors stock levels, predicts potential stockouts, and generates a purchase order in Google Sheets — all from a single question.
+This refined version applies two Cohort 1 lab patterns that were not yet in the original prototype:
+
+1. **MCP Toolbox for Databases** — agents now query AlloyDB through a standardized, secure MCP layer instead of direct Python SQL calls. Same MCP discipline as the Google Sheets output integration.
+2. **AlloyDB AI vector embeddings** — products are embedded as 6-week sales velocity vectors. A new `find_similar_pattern_items` tool finds products whose pattern matches a known fast seller, surfacing predictive restock candidates before they show strong sales.
 
 ## Architecture
 
 ```
 User (Browser)
-      │ HTTP
-      ▼
+   ↓ HTTP
 Cloud Run (FastAPI)
-      │
-      ▼
-Google ADK (SequentialAgent)
-      │
-      ├── Sales Analyst Agent ──→ AlloyDB (sales data)
-      ├── Inventory Checker Agent ──→ AlloyDB (stock levels)
-      └── Restock Decider Agent ──→ Google Sheets (MCP)
+   ↓
+[Google ADK]
+ Manager Agent (SequentialAgent)
+   ├── Sales Analyst Agent      → MCP Toolbox → AlloyDB
+   │   • get_sales_summary
+   │   • get_sales_trends
+   │   • find_similar_pattern_items  ← vector similarity search
+   ├── Inventory Checker Agent  → MCP Toolbox → AlloyDB
+   │   • get_inventory_status
+   │   • get_low_stock_items
+   └── Restock Decider Agent    → Google Sheets via MCP
+       • create_purchase_order
 ```
+
+The MCP Toolbox runs as a sidecar inside the same Cloud Run container (not a separate service) — keeping cost low while making the architectural layer explicit.
 
 ## Tech Stack
 
-| Technology | Role |
-|-----------|------|
-| Google ADK | Multi-agent orchestration (SequentialAgent) |
-| Gemini 2.5 Flash | AI model for each agent |
-| AlloyDB | Database (products, sales, inventory, suppliers) |
-| Google Sheets (MCP) | Purchase order output |
-| Cloud Run | Deployment (asia-southeast1) |
-| FastAPI | Backend API |
+| Technology | Role | Why |
+|-----------|------|-----|
+| Google ADK | Multi-agent system | Orchestrates manager + sub-agents |
+| Gemini 2.5 Flash | AI model | Fast, accurate decision-making |
+| AlloyDB AI | Data + vectors | Structured data + similarity search |
+| MCP Toolbox | Data access | Secure, standardized agent queries |
+| MCP (Sheets) | Output | Ready-to-use purchase orders |
+| Cloud Run | Deployment | Auto-scale, low maintenance |
+| FastAPI | Backend | Simple API integration |
 
-## Features
+## Restock Triggers (3 conditions, any one fires a restock)
 
-1. **Sales Trend Analysis** — Identifies fast/slow movers and rising demand from AlloyDB
-2. **Stock Level Monitoring** — Checks inventory against reorder points
-3. **Predictive Restocking** — Recommends early restocking for trending items before stockouts
-4. **Automated Purchase Order** — Creates purchase orders grouped by supplier in Google Sheets
-5. **Natural Language Interface** — Ask one question, get a complete answer
+| Trigger | Condition | Source |
+|---|---|---|
+| **Low Stock** | `current_stock < reorder_point` | Inventory Checker (SQL) |
+| **Trending Up** | `pct_change >= 10%` AND `current_stock < 1.5x reorder_point` | Sales Analyst (SQL) |
+| **Similar Pattern** *(new)* | `similarity_score >= 0.7` to a fast mover AND `current_stock < 1.5x reorder_point` | Sales Analyst (vector search) |
 
-## Multi-Agent Workflow
+## Files
 
-1. Shop owner asks: "What should I restock this week?"
-2. **Sales Analyst** queries AlloyDB for sales trends and rising demand
-3. **Inventory Checker** compares current stock against reorder points
-4. **Restock Decider** combines both inputs — restocks low stock items AND items trending toward stockout
-5. **Order Generator** creates a purchase order and pushes it to Google Sheets
+- `main.py` — FastAPI app with `/api/restock` endpoint
+- `agents.py` — ADK agent definitions + prompts
+- `tools.py` — Tool functions (HTTP wrappers calling MCP Toolbox)
+- `tools.yaml` — MCP Toolbox tool definitions
+- `migrate_schema.py` — Idempotent schema migration (adds vector column + populates embeddings)
+- `start.sh` — Container startup orchestration (migration -> toolbox -> FastAPI)
+- `Dockerfile` — Python 3.11 + MCP Toolbox v0.15 binary
+- `static/index.html` — Two-panel UI (inventory + chat)
 
-## Dataset
-
-Synthetic dataset for a steam bun shop with 18 products (buns, dim sum, pastries):
-- 4 suppliers with lead times
-- 9,852 sales transactions over 6 months
-- Current inventory with mix of critical, low, and healthy stock levels
-
-## Project Structure
-
-```
-├── main.py              # FastAPI app + API endpoints
-├── agents.py            # ADK agent definitions (SequentialAgent + 3 sub-agents)
-├── tools.py             # Tool functions (AlloyDB queries + Google Sheets)
-├── schema.sql           # Database schema (4 tables)
-├── db_setup.py          # Load CSV data into AlloyDB
-├── static/
-│   └── index.html       # Chat UI with inventory panel
-├── dataset/
-│   ├── suppliers.csv
-│   ├── products.csv
-│   ├── sales.csv
-│   └── inventory.csv
-├── Dockerfile
-└── requirements.txt
-```
-
-## Setup
-
-### Environment Variables
-
-```
-GOOGLE_CLOUD_PROJECT=your-project-id
-GOOGLE_CLOUD_LOCATION=asia-southeast1
-GOOGLE_GENAI_USE_VERTEXAI=true
-DB_HOST=your-alloydb-ip
-DB_USER=postgres
-DB_PASS=your-password
-DB_NAME=stockmanager
-GOOGLE_SHEETS_ID=your-spreadsheet-id
-```
-
-### Deploy to Cloud Run
+## Deploy
 
 ```bash
 gcloud run deploy stock-manager \
   --source . \
   --region asia-southeast1 \
-  --allow-unauthenticated \
-  --vpc-connector your-vpc-connector \
-  --set-env-vars "..." \
-  --memory 1Gi \
-  --timeout 300
+  --vpc-connector stock-manager-connector \
+  --allow-unauthenticated
 ```
 
-## Google Gen AI Academy APAC 2026 — Cohort 2 Hackathon
+The migration runs automatically on each container startup (idempotent — safe to redeploy).
+
+## Cohort
+
+Built for Google Cloud Gen AI Academy APAC 2026 — Top 100 Prototype Refinement Phase. Track: Multi-Agent Productivity Assistant.

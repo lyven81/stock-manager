@@ -2,6 +2,7 @@
 
 import os
 import uuid
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -57,19 +58,35 @@ async def restock(request: Request):
         role="user", parts=[types.Part(text=user_message)]
     )
 
-    all_texts = []
-    async for event in runner.run_async(
-        user_id=user_id, session_id=session_id, new_message=content
-    ):
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.text and part.text.strip():
-                    all_texts.append(part.text.strip())
+    # Retry up to 3 times on rate limit errors
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            all_texts = []
+            async for event in runner.run_async(
+                user_id=user_id, session_id=session_id, new_message=content
+            ):
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if part.text and part.text.strip():
+                            all_texts.append(part.text.strip())
 
-    # The last text response is from the final agent in the sequence
-    response_text = all_texts[-1] if all_texts else "Sorry, I could not process your request. Please try again."
+            response_text = all_texts[-1] if all_texts else "Sorry, I could not process your request. Please try again."
+            return JSONResponse({"response": response_text, "session_id": session_id})
 
-    return JSONResponse({"response": response_text, "session_id": session_id})
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5 * (attempt + 1))
+                    # Create a fresh session for retry
+                    session_id = str(uuid.uuid4())
+                    await session_service.create_session(
+                        app_name="stock_manager", user_id=user_id, session_id=session_id
+                    )
+                    continue
+            return JSONResponse(
+                {"response": "The system is busy right now. Please wait a moment and try again.", "session_id": session_id}
+            )
 
 
 @app.get("/api/inventory")
